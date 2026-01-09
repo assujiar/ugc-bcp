@@ -1,0 +1,338 @@
+diff --git a/supabase/migrations/00_schema.sql b/supabase/migrations/00_schema.sql
+--- a/supabase/migrations/00_schema.sql
++++ b/supabase/migrations/00_schema.sql
+@@
+-- ACT requires 4-digit daily sequence: ACTddmmyyxxxx
+@@
+-    || lpad(seq::text, 3, '0');
++    || lpad(seq::text, seq_width, '0');
+
+diff --git a/supabase/migrations/02_rls.sql b/supabase/migrations/02_rls.sql
+--- a/supabase/migrations/02_rls.sql
++++ b/supabase/migrations/02_rls.sql
+@@
+-- KRITIS: Ops must not bypass masking by reading masked RFQ directly from tickets table.
+@@
+-using (app_can_read_ticket(tickets));
++using (
++  app_is_super_admin()
++  or app_is_director()
++  or (
++    app_is_ops()
++    and app_is_authenticated()
++    and app_current_dept() = tickets.dept_target
++    and not (
++      tickets.ticket_type = 'inquiry tariff'
++      and coalesce(tickets.need_customer_masking, false) = true
++    )
++  )
++  or (
++    not app_is_ops()
++    and app_can_read_ticket(tickets)
++  )
++);
+
+diff --git a/supabase/migrations/03_views.sql b/supabase/migrations/03_views.sql
+--- a/supabase/migrations/03_views.sql
++++ b/supabase/migrations/03_views.sql
+@@
++create or replace view v_customer_primary_lead_owner as
++select
++  x.customer_id,
++  x.lead_id as primary_lead_id,
++  x.sales_owner_user_id as primary_sales_owner_user_id,
++  x.lead_date as primary_lead_date
++from (
++  select
++    l.customer_id,
++    l.lead_id,
++    l.sales_owner_user_id,
++    l.lead_date,
++    row_number() over (
++      partition by l.customer_id
++      order by coalesce(l.created_at, (l.lead_date::timestamp)) desc, l.lead_id desc
++    ) as rn
++  from leads l
++  where l.customer_id is not null
++    and l.sales_owner_user_id is not null
++    and l.status <> 'Disqualified'::lead_status
++) x
++where x.rn = 1;
+@@
+-create or replace view v_my_customers_ar as
++create or replace view v_my_customers_ar as
+ select
+   c.customer_id,
+   c.company_name,
++  o.primary_sales_owner_user_id,
+   a.ar_total,
+   a.bucket_1_30,
+   a.bucket_31_60,
+   a.bucket_61_90,
+   a.bucket_90_plus
+ from customers c
+ join v_ar_aging a on a.customer_id = c.customer_id;
++left join v_customer_primary_lead_owner o on o.customer_id = c.customer_id;
+
+diff --git a/app/api/invoices/route.ts b/app/api/invoices/route.ts
+--- a/app/api/invoices/route.ts
++++ b/app/api/invoices/route.ts
+@@ export async function GET(request: NextRequest) {
+-    // Use outstanding view for AR data
+-    let query = supabase
+-      .from("v_invoice_outstanding")
+-      .select("*", { count: "exact" });
++    // Use v_invoice_aging view for AR data.  This view includes status, amount_paid,
++    // outstanding and days_overdue fields.  We select all columns and get an exact count
++    // for pagination.
++    let query = supabase
++      .from("v_invoice_aging")
++      .select("*", { count: "exact" });
+@@
+-    if (status === "paid") {
+-      query = query.eq("outstanding_amount", 0);
+-    } else if (status === "outstanding") {
+-      query = query.gt("outstanding_amount", 0).eq("is_overdue", false);
+-    } else if (status === "overdue") {
+-      query = query.eq("is_overdue", true);
+-    }
++    if (status === "paid") {
++      // Filter invoices that are fully paid based on the status column
++      query = query.eq("status", "PAID");
++    } else if (status === "outstanding") {
++      // Outstanding but not yet overdue: positive outstanding and no days overdue
++      query = query.gt("outstanding", 0).eq("days_overdue", 0);
++    } else if (status === "overdue") {
++      // Overdue invoices: positive outstanding and days overdue > 0
++      query = query.gt("outstanding", 0).gt("days_overdue", 0);
++    }
+@@ export async function POST(request: NextRequest) {
+-    // Create invoice
+-    const { data: invoice, error } = await supabase
+-      .from("invoices")
+-      .insert({
+-        customer_id,
+-        invoice_date,
+-        due_date,
+-        invoice_amount: parseFloat(invoice_amount),
+-        currency: currency || "IDR",
+-        notes: notes || null,
+-        created_by: profile.user_id,
+-      })
+-      .select()
+-      .single();
+-
+-    if (error) {
+-      console.error("Error creating invoice:", error);
+-      return NextResponse.json({ error: error.message }, { status: 500 });
+-    }
+-
+-    // Log audit
+-    await supabase.from("audit_logs").insert({
+-      table_name: "invoices",
+-      record_id: invoice.invoice_id,
+-      action: "INSERT",
+-      changed_by: profile.user_id,
+-      after_data: invoice,
+-    });
+-
+-    return NextResponse.json({ invoice }, { status: 201 });
++    // Call atomic RPC to create invoice (and optional initial payment).  The RPC
++    // validates required fields and returns the new invoice_id, optional payment_id
++    // and the resulting status.  See PATCHES.sql for details.
++    const { data: rpcResult, error: rpcError } = await supabase.rpc(
++      "finance_create_invoice_with_payment",
++      {
++        payload: {
++          customer_id,
++          invoice_date,
++          due_date,
++          invoice_amount: parseFloat(invoice_amount),
++          currency: currency || "IDR",
++          notes: notes || null,
++          // Optional payment fields may be provided in the request body.  They will
++          // be ignored by the RPC if undefined.
++          payment_amount: body.payment_amount ? parseFloat(body.payment_amount) : undefined,
++          payment_date: body.payment_date,
++          payment_method: body.payment_method,
++          payment_reference: body.payment_reference,
++          payment_notes: body.payment_notes,
++        },
++      }
++    );
++
++    if (rpcError || !rpcResult) {
++      console.error("Error creating invoice via RPC:", rpcError);
++      return NextResponse.json({ error: rpcError?.message || "Failed to create invoice" }, { status: 500 });
++    }
++
++    const invoiceId = rpcResult.invoice_id as string;
++    // Retrieve the newly created invoice record for the response
++    const { data: invoice, error: fetchError } = await supabase
++      .from("invoices")
++      .select("*")
++      .eq("invoice_id", invoiceId)
++      .single();
++
++    if (fetchError || !invoice) {
++      console.error("Error fetching created invoice:", fetchError);
++      return NextResponse.json({ error: fetchError?.message || "Invoice created but could not be fetched" }, { status: 500 });
++    }
++
++    // Log audit.  Include the invoice data returned from the fetch for after_data.
++    await supabase.from("audit_logs").insert({
++      table_name: "invoices",
++      record_id: invoiceId,
++      action: "INSERT",
++      changed_by: profile.user_id,
++      after_data: invoice,
++    });
++
++    return NextResponse.json({ invoice, payment_id: rpcResult.payment_id, status: rpcResult.status }, { status: 201 });
+
+diff --git a/app/api/invoices/[invoice_id]/payments/route.ts b/app/api/invoices/[invoice_id]/payments/route.ts
+--- a/app/api/invoices/[invoice_id]/payments/route.ts
++++ b/app/api/invoices/[invoice_id]/payments/route.ts
+@@ export async function POST(
+-    // Verify invoice exists and get outstanding amount
+-    const { data: invoiceData, error: invoiceError } = await supabase
+-      .from("v_invoice_outstanding")
+-      .select("invoice_id, invoice_amount, outstanding_amount")
+-      .eq("invoice_id", invoice_id)
+-      .single();
+-
+-    if (invoiceError || !invoiceData) {
+-      return NextResponse.json({ error: "Invoice not found" }, { status: 404 });
+-    }
+-
+-    // Warn if payment exceeds outstanding (but allow it)
+-    const paymentAmount = parseFloat(amount);
+-    if (paymentAmount > invoiceData.outstanding_amount) {
+-      console.warn(`Payment amount ${paymentAmount} exceeds outstanding ${invoiceData.outstanding_amount} for invoice ${invoice_id}`);
+-    }
++    // Verify invoice exists and get outstanding amount.  Use the v_invoice_aging view
++    // instead of v_invoice_outstanding.  The view returns an `outstanding` field
++    // representing the remaining balance on the invoice.  This allows us to also
++    // retrieve other metadata (like days_overdue) if needed.
++    const { data: invoiceData, error: invoiceError } = await supabase
++      .from("v_invoice_aging")
++      .select("invoice_id, outstanding")
++      .eq("invoice_id", invoice_id)
++      .single();
++
++    if (invoiceError || !invoiceData) {
++      return NextResponse.json({ error: "Invoice not found" }, { status: 404 });
++    }
++
++    // Warn if payment exceeds outstanding (but allow it).  Use the `outstanding`
++    // field from v_invoice_aging.  If `outstanding` is null treat as zero.
++    const paymentAmount = parseFloat(amount);
++    const currentOutstanding = parseFloat(invoiceData.outstanding || "0");
++    if (paymentAmount > currentOutstanding) {
++      console.warn(
++        `Payment amount ${paymentAmount} exceeds outstanding ${currentOutstanding} for invoice ${invoice_id}`
++      );
++    }
+@@
+-    // Get updated outstanding
+-    const { data: updatedInvoice } = await supabase
+-      .from("v_invoice_outstanding")
+-      .select("outstanding_amount")
+-      .eq("invoice_id", invoice_id)
+-      .single();
+-
+-    return NextResponse.json({ 
+-      payment,
+-      remaining_outstanding: updatedInvoice?.outstanding_amount || 0,
+-    }, { status: 201 });
++    // After inserting a payment, update the invoice status based on remaining
++    // outstanding.  Use the v_invoice_aging view to obtain the latest
++    // outstanding balance.  If outstanding > 0 then status becomes
++    // WAITING_PAYMENT, otherwise it becomes PAID.
++    const { data: invoiceSummary, error: summaryError } = await supabase
++      .from("v_invoice_aging")
++      .select("outstanding")
++      .eq("invoice_id", invoice_id)
++      .single();
++    if (!summaryError && invoiceSummary) {
++      const outstanding = parseFloat(invoiceSummary.outstanding || "0");
++      const newStatus = outstanding > 0 ? "WAITING_PAYMENT" : "PAID";
++      await supabase
++        .from("invoices")
++        .update({ status: newStatus })
++        .eq("invoice_id", invoice_id);
++    }
++
++    // Get updated outstanding amount for the response
++    const { data: updated } = await supabase
++      .from("v_invoice_aging")
++      .select("outstanding")
++      .eq("invoice_id", invoice_id)
++      .single();
++
++    return NextResponse.json(
++      {
++        payment,
++        remaining_outstanding: updated?.outstanding || 0,
++      },
++      { status: 201 }
++    );
+
+diff --git a/app/api/dso/route.ts b/app/api/dso/route.ts
+--- a/app/api/dso/route.ts
++++ b/app/api/dso/route.ts
+@@ if (type === "summary") {
+-      // Get overall AR summary
+-      const { data: outstanding, error: outstandingError } = await supabase
+-        .from("v_invoice_outstanding")
+-        .select("*");
+-
+-      if (outstandingError) {
+-        return NextResponse.json({ error: outstandingError.message }, { status: 500 });
+-      }
+-
+-      // Calculate summary metrics
+-      const totalAR = outstanding?.reduce((sum, inv) => sum + parseFloat(inv.outstanding_amount || "0"), 0) || 0;
+-      const totalOverdue = outstanding?.filter((inv) => inv.is_overdue).reduce((sum, inv) => sum + parseFloat(inv.outstanding_amount || "0"), 0) || 0;
+-      const overdueCount = outstanding?.filter((inv) => inv.is_overdue).length || 0;
+-      const totalInvoices = outstanding?.length || 0;
++      // Get overall AR summary using v_invoice_aging.  This view provides
++      // outstanding (remaining balance) and days_overdue for each invoice.
++      const { data: aging, error: agingError } = await supabase
++        .from("v_invoice_aging")
++        .select("*");
++
++      if (agingError) {
++        return NextResponse.json({ error: agingError.message }, { status: 500 });
++      }
++
++      // Calculate summary metrics.  Only consider invoices with positive
++      // outstanding for AR totals.  Overdue invoices are those with
++      // outstanding > 0 and days_overdue > 0.
++      const totalAR = aging?.reduce((sum, inv) => sum + parseFloat(inv.outstanding || "0"), 0) || 0;
++      const totalOverdue = aging?.filter((inv) => parseFloat(inv.outstanding || "0") > 0 && inv.days_overdue > 0)
++        .reduce((sum, inv) => sum + parseFloat(inv.outstanding || "0"), 0) || 0;
++      const overdueCount = aging?.filter((inv) => parseFloat(inv.outstanding || "0") > 0 && inv.days_overdue > 0).length || 0;
++      const totalInvoices = aging?.length || 0;
+
+diff --git a/app/api/notifications/route.ts b/app/api/notifications/route.ts
+--- a/app/api/notifications/route.ts
++++ b/app/api/notifications/route.ts
+@@ if (["finance", "super admin", "Director"].includes(profile.role_name)) {
+-      const { data: overdueInvoices } = await supabase
+-        .from("v_invoice_outstanding")
+-        .select("invoice_id, customer_id, outstanding_amount, days_past_due")
+-        .eq("is_overdue", true)
+-        .gt("outstanding_amount", 0)
+-        .order("days_past_due", { ascending: false })
+-        .limit(3);
++      const { data: overdueInvoices } = await supabase
++        .from("v_invoice_aging")
++        .select("invoice_id, customer_id, outstanding, days_overdue")
++        .gt("outstanding", 0)
++        .gt("days_overdue", 0)
++        .order("days_overdue", { ascending: false })
++        .limit(3);
+@@
+-            message: `${inv.invoice_id} - ${inv.days_past_due} days overdue (Rp ${Number(inv.outstanding_amount).toLocaleString("id-ID")})`,
++            message: `${inv.invoice_id} - ${inv.days_overdue} days overdue (Rp ${Number(inv.outstanding).toLocaleString("id-ID")})`,
