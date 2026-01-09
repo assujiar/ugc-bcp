@@ -3,7 +3,7 @@
 import * as React from "react";
 import { useRouter } from "next/navigation";
 import { useUser } from "@/lib/contexts/user-context";
-import { createLead } from "@/lib/api";
+import { createLead, checkLeadDuplicate, DedupMatch } from "@/lib/api";
 import {
   ArrowLeft,
   Loader2,
@@ -18,6 +18,8 @@ import {
   Calendar,
   MessageSquare,
   FileText,
+  AlertTriangle,
+  X,
 } from "lucide-react";
 import Link from "next/link";
 
@@ -65,6 +67,12 @@ export default function NewLeadPage() {
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [success, setSuccess] = React.useState(false);
+
+  // Dedup check state
+  const [checkingDedup, setCheckingDedup] = React.useState(false);
+  const [dedupMatches, setDedupMatches] = React.useState<DedupMatch[]>([]);
+  const [showDedupModal, setShowDedupModal] = React.useState(false);
+  const [forceCreate, setForceCreate] = React.useState(false);
 
   // Form state
   const [formData, setFormData] = React.useState({
@@ -114,6 +122,39 @@ export default function NewLeadPage() {
     }));
   };
 
+  // Check for duplicates before submitting
+  const checkDuplicates = async (): Promise<boolean> => {
+    if (!formData.email && !formData.contact_phone) {
+      return true; // No email/phone to check
+    }
+
+    setCheckingDedup(true);
+    try {
+      const result = await checkLeadDuplicate(
+        formData.email || undefined,
+        formData.contact_phone || undefined
+      );
+
+      if (result.error) {
+        console.error("Error checking duplicates:", result.error);
+        return true; // Proceed if check fails
+      }
+
+      if (result.data?.exists && result.data.matches.length > 0) {
+        setDedupMatches(result.data.matches);
+        setShowDedupModal(true);
+        return false; // Stop submission, show modal
+      }
+
+      return true; // No duplicates, proceed
+    } catch (err) {
+      console.error("Error checking duplicates:", err);
+      return true; // Proceed if check fails
+    } finally {
+      setCheckingDedup(false);
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
@@ -140,6 +181,18 @@ export default function NewLeadPage() {
         return;
       }
     }
+
+    // Check for duplicates (unless force create is enabled)
+    if (!forceCreate) {
+      const canProceed = await checkDuplicates();
+      if (!canProceed) {
+        setLoading(false);
+        return;
+      }
+    }
+
+    // Reset force create flag
+    setForceCreate(false);
 
     // Get dept_target from service
     const service = SERVICES.find((s) => s.code === formData.service_code);
@@ -189,6 +242,17 @@ export default function NewLeadPage() {
     }
   };
 
+  // Handle force create after user confirms
+  const handleForceCreate = () => {
+    setShowDedupModal(false);
+    setForceCreate(true);
+    // Trigger form submit programmatically
+    const form = document.querySelector("form");
+    if (form) {
+      form.requestSubmit();
+    }
+  };
+
   if (success) {
     return (
       <div className="flex flex-col items-center justify-center py-20">
@@ -201,6 +265,73 @@ export default function NewLeadPage() {
 
   return (
     <>
+      {/* Duplicate Warning Modal */}
+      {showDedupModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+          <div className="bg-background rounded-[14px] shadow-xl max-w-lg w-full mx-4 max-h-[80vh] overflow-hidden">
+            <div className="p-6 border-b border-border flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="p-2 rounded-full bg-warning/10">
+                  <AlertTriangle className="h-6 w-6 text-warning" />
+                </div>
+                <h2 className="text-lg font-semibold text-foreground">Possible Duplicate Found</h2>
+              </div>
+              <button
+                onClick={() => setShowDedupModal(false)}
+                className="p-1 rounded-lg hover:bg-muted transition-colors"
+              >
+                <X className="h-5 w-5 text-muted-foreground" />
+              </button>
+            </div>
+            <div className="p-6 overflow-y-auto max-h-[50vh]">
+              <p className="text-sm text-muted-foreground mb-4">
+                We found {dedupMatches.length} existing record(s) that match the email or phone number you entered.
+                Please review the matches below:
+              </p>
+              <div className="space-y-3">
+                {dedupMatches.map((match, index) => (
+                  <div key={`${match.type}-${match.id}-${index}`} className="p-3 rounded-lg border border-border bg-muted/30">
+                    <div className="flex items-center gap-2 mb-2">
+                      <span className={`badge text-xs ${match.type === "lead" ? "badge-info" : "badge-success"}`}>
+                        {match.type === "lead" ? "Lead" : "Customer"}
+                      </span>
+                      <span className="text-xs text-muted-foreground">
+                        Matched by: {match.match_field}
+                      </span>
+                      {match.status && (
+                        <span className="text-xs text-muted-foreground">
+                          Status: {match.status}
+                        </span>
+                      )}
+                    </div>
+                    <p className="font-medium text-foreground">{match.company_name}</p>
+                    <p className="text-sm text-muted-foreground">{match.pic_name}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {match.email && <span className="mr-2">{match.email}</span>}
+                      {match.phone && <span>{match.phone}</span>}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="p-6 border-t border-border flex items-center justify-end gap-3">
+              <button
+                onClick={() => setShowDedupModal(false)}
+                className="btn-outline"
+              >
+                Cancel & Edit
+              </button>
+              <button
+                onClick={handleForceCreate}
+                className="btn-primary"
+              >
+                Create Anyway
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Page Header */}
       <div className="mb-6">
         <Link
@@ -644,11 +775,16 @@ export default function NewLeadPage() {
           <Link href="/crm/leads" className="btn-outline">
             Cancel
           </Link>
-          <button type="submit" className="btn-primary" disabled={loading}>
+          <button type="submit" className="btn-primary" disabled={loading || checkingDedup}>
             {loading ? (
               <>
                 <Loader2 className="h-4 w-4 animate-spin mr-2" />
                 Creating...
+              </>
+            ) : checkingDedup ? (
+              <>
+                <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                Checking...
               </>
             ) : (
               "Create Lead"

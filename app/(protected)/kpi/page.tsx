@@ -14,6 +14,7 @@ import {
   FileEdit,
   BarChart3,
   ChevronDown,
+  Edit3,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { createClient } from "@/lib/supabase/client";
@@ -172,6 +173,10 @@ export default function KpiPage() {
           <p className="text-muted-foreground">Track performance against targets</p>
         </div>
         <div className="flex items-center gap-2">
+          <Link href="/kpi/progress" className="btn-outline">
+            <Edit3 className="h-4 w-4" />
+            Update Progress
+          </Link>
           <Link href="/kpi/input" className="btn-outline">
             <FileEdit className="h-4 w-4" />
             Manual Input
