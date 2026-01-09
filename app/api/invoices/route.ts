@@ -21,9 +21,11 @@ export async function GET(request: NextRequest) {
     const sortBy = searchParams.get("sortBy") || "invoice_date";
     const sortOrder = searchParams.get("sortOrder") || "desc";
 
-    // Use outstanding view for AR data
+    // Use v_invoice_aging view for AR data.  This view includes status, amount_paid,
+    // outstanding and days_overdue fields.  We select all columns and get an exact count
+    // for pagination.
     let query = supabase
-      .from("v_invoice_outstanding")
+      .from("v_invoice_aging")
       .select("*", { count: "exact" });
 
     // Join with customers for company name
@@ -34,11 +36,14 @@ export async function GET(request: NextRequest) {
       query = query.or(`invoice_id.ilike.%${search}%,customer_id.ilike.%${search}%`);
     }
     if (status === "paid") {
-      query = query.eq("outstanding_amount", 0);
+      // Filter invoices that are fully paid based on the status column
+      query = query.eq("status", "PAID");
     } else if (status === "outstanding") {
-      query = query.gt("outstanding_amount", 0).eq("is_overdue", false);
+      // Outstanding but not yet overdue: positive outstanding and no days overdue
+      query = query.gt("outstanding", 0).eq("days_overdue", 0);
     } else if (status === "overdue") {
-      query = query.eq("is_overdue", true);
+      // Overdue invoices: positive outstanding and days overdue > 0
+      query = query.gt("outstanding", 0).gt("days_overdue", 0);
     }
     if (customerId) {
       query = query.eq("customer_id", customerId);
@@ -112,36 +117,58 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
     }
 
-    // Create invoice
-    const { data: invoice, error } = await supabase
-      .from("invoices")
-      .insert({
-        customer_id,
-        invoice_date,
-        due_date,
-        invoice_amount: parseFloat(invoice_amount),
-        currency: currency || "IDR",
-        notes: notes || null,
-        created_by: profile.user_id,
-      })
-      .select()
-      .single();
+    // Call atomic RPC to create invoice (and optional initial payment).  The RPC
+    // validates required fields and returns the new invoice_id, optional payment_id
+    // and the resulting status.  See PATCHES.sql for details.
+    const { data: rpcResult, error: rpcError } = await supabase.rpc(
+      "finance_create_invoice_with_payment",
+      {
+        payload: {
+          customer_id,
+          invoice_date,
+          due_date,
+          invoice_amount: parseFloat(invoice_amount),
+          currency: currency || "IDR",
+          notes: notes || null,
+          // Optional payment fields may be provided in the request body.  They will
+          // be ignored by the RPC if undefined.
+          payment_amount: body.payment_amount ? parseFloat(body.payment_amount) : undefined,
+          payment_date: body.payment_date,
+          payment_method: body.payment_method,
+          payment_reference: body.payment_reference,
+          payment_notes: body.payment_notes,
+        },
+      }
+    );
 
-    if (error) {
-      console.error("Error creating invoice:", error);
-      return NextResponse.json({ error: error.message }, { status: 500 });
+    if (rpcError || !rpcResult) {
+      console.error("Error creating invoice via RPC:", rpcError);
+      return NextResponse.json({ error: rpcError?.message || "Failed to create invoice" }, { status: 500 });
     }
 
-    // Log audit
+    const invoiceId = rpcResult.invoice_id as string;
+    // Retrieve the newly created invoice record for the response
+    const { data: invoice, error: fetchError } = await supabase
+      .from("invoices")
+      .select("*")
+      .eq("invoice_id", invoiceId)
+      .single();
+
+    if (fetchError || !invoice) {
+      console.error("Error fetching created invoice:", fetchError);
+      return NextResponse.json({ error: fetchError?.message || "Invoice created but could not be fetched" }, { status: 500 });
+    }
+
+    // Log audit.  Include the invoice data returned from the fetch for after_data.
     await supabase.from("audit_logs").insert({
       table_name: "invoices",
-      record_id: invoice.invoice_id,
+      record_id: invoiceId,
       action: "INSERT",
       changed_by: profile.user_id,
       after_data: invoice,
     });
 
-    return NextResponse.json({ invoice }, { status: 201 });
+    return NextResponse.json({ invoice, payment_id: rpcResult.payment_id, status: rpcResult.status }, { status: 201 });
   } catch (error) {
     console.error("Error in POST /api/invoices:", error);
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });
