@@ -335,6 +335,83 @@ export async function createMarketingSpend(data: {
   });
 }
 
+// KPI Progress/Actuals
+export interface KpiProgress {
+  target_id?: number;
+  metric_key: string;
+  period_start: string;
+  period_end: string;
+  assignee_user_id?: string;
+  target_value?: number;
+  calc_method?: string;
+  direction?: string;
+  unit?: string;
+  actual_value: number;
+  actual_notes?: string;
+  actual_updated_at?: string;
+}
+
+export async function fetchKpiProgress(params?: {
+  period_start?: string;
+  period_end?: string;
+  metric_key?: string;
+  user_id?: string;
+}) {
+  return apiClient<{ data: KpiProgress[] }>("/api/kpi/progress", { params });
+}
+
+export async function updateKpiProgress(data: {
+  metric_key: string;
+  period_start: string;
+  period_end: string;
+  value: number;
+  notes?: string;
+}) {
+  return apiClient<{ success: boolean; actual_id?: string; metric_key?: string; value?: number }>("/api/kpi/progress", {
+    method: "POST",
+    body: data,
+  });
+}
+
+// Leads Stats
+export interface LeadsStats {
+  by_status: Record<string, { count: number; assigned?: number; unassigned?: number }>;
+  total: number;
+  total_assigned: number;
+  total_unassigned: number;
+}
+
+export async function fetchLeadsStats(assigneeId?: string) {
+  return apiClient<LeadsStats>("/api/leads/stats", {
+    params: assigneeId ? { assignee_id: assigneeId } : undefined,
+  });
+}
+
+// Leads Dedup
+export interface DedupMatch {
+  type: "lead" | "customer";
+  id: string;
+  company_name: string;
+  pic_name: string;
+  email?: string;
+  phone?: string;
+  status?: string;
+  match_field: "email" | "phone";
+}
+
+export interface DedupResult {
+  exists: boolean;
+  count: number;
+  matches: DedupMatch[];
+}
+
+export async function checkLeadDuplicate(email?: string, phone?: string) {
+  const params: Record<string, string> = {};
+  if (email) params.email = email;
+  if (phone) params.phone = phone;
+  return apiClient<DedupResult>("/api/leads/dedup", { params });
+}
+
 // ==========================================
 // Invoices & DSO API
 // ==========================================
