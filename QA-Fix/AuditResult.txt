@@ -1,0 +1,191 @@
+QA Remediation Report – UGC Integrated Dashboard (Jan 2026)
+Executive Summary
+
+This audit was performed against the UGC Logistics Integrated Dashboard (Next.js 16 + Supabase) on 09 Jan 2026. The objective was to act as a QA sherif and on‑call engineer: to review the database schema, row‑level security (RLS) policies, route handlers, and UI components, then identify defects (P0/P1/P2) and recommend minimal, stable fixes. Evidence collection was prioritised over assumptions; screenshots, code snippets and SQL definitions were examined directly from the source repository and Supabase migration scripts. This report is accompanied by incremental patches (PATCHES.sql, PATCHES.diff), seed data for smoke testing, a smoke‑test matrix covering 15 roles × 5 top‑level menus, and a verification checklist.
+
+Methodology
+
+Inventory: the codebase was unzipped and inspected to understand the project structure. The supabase/migrations/00_schema.sql file defines tables, enums, triggers and helper functions such as next_prefixed_id(), find_or_create_customer() and find_or_create_prospect(). The 02_rls.sql file establishes a default‑deny posture with helper functions (app_current_role(), app_can_read_*() etc.) and detailed RLS policies. The Next.js app uses server‑side session checks (getProfile()) to gate protected routes; client‑side components rely on role definitions in roles.ts and an RBAC matrix in permissions.ts to determine which menus appear.
+
+Static analysis: TypeScript errors were reviewed (ts-errors.txt), UI components examined (e.g. components/ui/dropdown-menu.tsx), and API route handlers inspected. Important flows were checked for atomicity, idempotency, audit logging and RLS compliance.
+
+Sanity checks: the blueprint documents and technical guidelines were cross‑referenced with the current implementation to identify missing features such as AR/DSO ageing views, deduplication triggers, SLA event triggers and invoice status management.
+
+Seed data & tests: a dummy data set was prepared to exercise all major flows (KPI, CRM, Ticketing, DSO). A smoke‑test matrix enumerates allowed actions per role and menu.
+
+P0 Issues (Blockers / Data‑integrity risks)
+P0‑1 – Lack of invoice status & AR ageing view
+
+Symptom / reproduce: navigate to the DSO module as a finance or sales role. Invoices are displayed but there is no status field indicating whether they have been sent, are waiting for payment, are paid or voided. The DSO/AR dashboard cannot compute outstanding buckets (0–30 days, 31–60 days, etc.) or rolling DSO because no view exists to summarise ageing. Users must manually calculate ageing in spreadsheets, leading to inconsistencies.
+
+Root cause: the invoices table only stores invoice_id, invoice_date, due_date, invoice_amount and metadata. There is no status column nor enum type to track lifecycle events (CREATE/SENT/WAITING_PAYMENT/PAID/VOID). Similarly, no view aggregates invoice balances against due dates; the blueprint references views like v_outstanding_aging and v_ar_rolling_dso, but these are absent in 03_views.sql.
+
+Recommendation: introduce an invoice_status enum and a status column on invoices, defaulting to CREATED. Provide a view v_invoice_aging that joins invoices and payments to compute the outstanding amount and classify each invoice into ageing buckets (CURRENT, 1‑30, 31‑60, 61‑90, >90, PAID). This view can also derive a boolean is_overdue flag and days past due. DSO pages should query this view instead of raw tables. For minimal change the existing payments table can remain unchanged; outstanding amount is computed as invoice.invoice_amount - coalesce(sum(payments.amount),0).
+
+Implementation: see PATCHES.sql for SQL statements creating the invoice_status type, adding the status column, and defining the v_invoice_aging view. Front‑end pages under /dso should be updated to read from this view (see PATCHES.diff).
+
+Verification: after running the patch and redeploying, create invoices and payments via the API or admin UI. The DSO module should display invoices with appropriate statuses. A query against v_invoice_aging should return correct ageing buckets and outstanding amounts for each invoice. See the verification checklist for detailed steps.
+
+P0‑2 – SLA events not captured automatically
+
+Symptom / reproduce: create a new ticket via /api/tickets and then post a reply using /api/tickets/messages. The sla_events table only records the initial OPENED event; there is no entry for the first response time or subsequent status changes. The SLA dashboard consequently shows zero first‑response metrics. Similarly, closing or changing the status of a ticket does not produce STATUS_CHANGE or RESOLVED events.
+
+Root cause: while sla_events exists, only the route handler for ticket creation inserts an OPENED event. There are no triggers on ticket_messages or tickets to log FIRST_RESPONSE, STATUS_CHANGE or RESOLVED events. The blueprint clearly states that SLA events should be captured automatically via triggers (FIRST_RESPONSE when a user replies, status change events on update, resolved when closed).
+
+Recommendation: implement database triggers to automatically insert SLA events. A trigger on ticket_messages should insert a FIRST_RESPONSE event the first time someone other than the ticket creator posts a message. Another trigger on tickets should fire after updates to insert a STATUS_CHANGE event whenever ticket_status or inquiry_status changes; if the new status indicates closure, insert a RESOLVED event. These triggers encapsulate the logic at the DB level, ensuring idempotency and auditability.
+
+Implementation: PATCHES.sql adds two PL/pgSQL functions (trg_sla_first_response and trg_sla_status_change) and attaches them via triggers. These functions check existing events to avoid duplicate inserts and write relevant metadata (who responded, from/to status). The route handlers require no change – they simply insert messages or update tickets and let the DB handle SLA events.
+
+Verification: after applying the patch, create a ticket and reply from another user. Verify that sla_events contains one OPENED and one FIRST_RESPONSE event for the ticket. Change the ticket status through the API and confirm that STATUS_CHANGE (and RESOLVED if applicable) events appear. The SLA dashboard should now compute first‑response and resolution metrics correctly.
+
+P0‑3 – Truncated UI component causing TypeScript build errors
+
+Symptom / reproduce: running pnpm build (or npm run build) fails with TS1005 and TS1109 errors in components/ui/dropdown-menu.tsx. The compiler points to missing commas and unexpected end of file around the export section. As a result the project cannot compile or deploy.
+
+Root cause: the original dropdown-menu.tsx file was truncated during authoring. It defined the menu components (e.g. DropdownMenu, DropdownMenuItem, DropdownMenuCheckboxItem), but the final export block was missing a closing brace and semicolon. This matches the errors recorded in ts-errors.txt.
+
+Recommendation: ensure that the export statement correctly enumerates all exported components and closes the block. The file provided in the new repository already includes the proper export block. If your working tree still uses the truncated file, apply the changes in PATCHES.diff to fix the syntax.
+
+Implementation: PATCHES.diff replaces the incomplete export block at the bottom of components/ui/dropdown-menu.tsx with a complete list of components and a closing brace. After applying the diff, re‑run the build to ensure TypeScript errors vanish.
+
+Verification: run npm run build or pnpm build after applying the patch. The build should succeed without errors related to dropdown-menu.tsx. Verify that dropdown menus render correctly in the UI.
+
+P0‑4 – Invoice and payment creation lack atomicity / idempotency
+
+Symptom / reproduce: finance creates an invoice via /api/invoices and then records a payment via /api/payments. If either operation fails mid‑way (e.g. network drop) the database may contain an invoice without its initial payment or vice versa. Retrying can lead to duplicate invoices or payments.
+
+Root cause: the current API inserts invoices and payments in separate requests. There is no RPC (remote procedure call) or database transaction that bundles invoice creation with an optional initial payment. Without idempotency and atomicity, partial writes can occur.
+
+Recommendation: introduce an RPC finance_create_invoice_with_payment(payload jsonb) that wraps the insertion of an invoice and an optional initial payment in a single transaction. The function should generate the invoice_id via next_prefixed_id('INV', invoice_date), insert into invoices, optionally insert into payments if payment_amount is provided, and return the invoice and payment IDs. An idempotency key (e.g. based on invoice natural key + amount) can be passed to prevent duplicates on retry. The API route handler should call this RPC instead of issuing separate inserts.
+
+Implementation: the new RPC is defined in PATCHES.sql (see FIX_FIN_01 section). It accepts a JSON payload with invoice and payment fields, performs validations, inserts the invoice and payment within a transaction, and returns the results. Front‑end and route handlers must be updated to call finance_create_invoice_with_payment (see PATCHES.diff).
+
+Verification: create an invoice with an initial payment using the updated API. Simulate a failure and retry; verify that no duplicate invoice or payment appears. Confirm that the invoice’s status transitions to WAITING_PAYMENT after creation and PAID after full payment is recorded.
+
+P0‑5 – Missing or inadequate RLS on auxiliary tables
+
+Symptom / reproduce: while most business tables (leads, customers, prospects, tickets, invoices, payments) have RLS enabled, some auxiliary tables such as imports, import_rows, audit_logs or marketing_spend can still be read or written by any authenticated user if RLS is not explicitly enforced. This potentially exposes sensitive data (e.g. import file contents, audit logs) to roles that should not see them.
+
+Root cause: the 02_rls.sql script enables RLS on many tables, but coverage must be verified for every table. In particular, the blueprint requires a default‑deny policy on all tables, with explicit USING/WITH CHECK predicates for select/insert/update/delete. A quick grep shows imports and import_rows have RLS enabled but no policies defined, effectively locking them (deny all). However, audit_logs also has RLS enabled without a select policy, meaning even super admin cannot read audit logs. Likewise, marketing_spend policies may be missing.
+
+Recommendation: audit the RLS policies table by table. For tables that should be readable by certain roles (e.g. audit_logs for super admin and director), define select policies accordingly. For tables that should remain locked (e.g. import_rows), leave them with default deny. Also create helper policies allowing the RPC functions to operate with security definer where necessary.
+
+Implementation: PATCHES.sql includes exemplar select policies for audit_logs (allowing super admin & director), imports (allow read/write by super admin and the user who created the import) and marketing_spend (allow marketing roles). Make sure to adjust as needed based on your security model.
+
+Verification: run the RLS smoke‑test script (RLS_SMOKE_TEST.sql) after applying policies. Authenticate as different roles and attempt to select from these tables; ensure only authorised roles succeed.
+
+P1 Issues (Important but non‑blocking)
+
+View and KPI engine completeness: the blueprint expects views like v_ticket_first_response_median, v_kpi_team_summary and v_ops_rfqs_masked. The 03_views.sql file implements some but not all. Ensure the missing views are implemented or documented for the front‑end to consume.
+
+Deduplication coverage: the functions find_or_create_customer() and find_or_create_prospect() deduplicate on NPWP, email, phone and company name. However, the API must always call the crm_create_lead_bundle RPC to enforce deduplication. Review the code for any direct insert into leads or insert into customers statements and replace them with the RPC. This prevents duplicate customers/leads.
+
+Mandatory close_reason: the API correctly validates that a CLOSED LOST inquiry must supply a close_reason, but this rule should also be enforced by a database check constraint. PATCHES.sql adds a CHECK on tickets to require close_reason when inquiry_status = 'CLOSED LOST'.
+
+User experience improvements: the UI should display proper empty, loading and error states on all pages. Pagination defaults (page 1, pageSize 20) should be preserved across sessions via query params or saved views. Mobile behaviour (drawer for filters) needs manual testing. These are cosmetic and thus P2 enhancements.
+
+P2 Issues (Enhancements / Nice‑to‑have)
+
+Materialised views for KPI / DSO: if the AR ageing view becomes expensive, consider materialising it and refreshing periodically. Similarly, KPI trend views can be materialised for better performance.
+
+Idempotent import system: current import logic (upload file → parse → insert into import_rows → process rows) is a solid foundation. To make it idempotent, compute a row_hash for each import row and upsert into the target tables based on natural keys. Provide a mechanism to retry only failed rows without re‑uploading the file.
+
+Self‑service password reset & email verification: outside the scope of this audit but beneficial for production readiness.
+
+Patch Set
+
+Two patch files accompany this report: PATCHES.sql (database changes) and PATCHES.diff (Next.js code). Apply the SQL against your Supabase instance using the migration runner in the order specified; then apply the code diff to the Next.js project and redeploy.
+
+Summary of PATCHES.sql
+Fix ID	Description
+FIX_DSO_01	Create enum invoice_status and add status column to invoices with default 'CREATED'.
+FIX_DSO_02	Create view v_invoice_aging to compute outstanding amounts, overdue days and ageing buckets by joining invoices and payments.
+FIX_SLA_01	Create PL/pgSQL function trg_sla_first_response and trigger on ticket_messages to insert FIRST_RESPONSE events.
+FIX_SLA_02	Create PL/pgSQL function trg_sla_status_change and trigger on tickets update to insert STATUS_CHANGE and RESOLVED events.
+FIX_FIN_01	Define RPC finance_create_invoice_with_payment(payload jsonb) to insert an invoice and optional payment atomically.
+FIX_SEC_01	Add RLS select policies on audit_logs, imports and marketing_spend for authorised roles; enforce close_reason check on tickets.
+Summary of PATCHES.diff
+File	Change
+components/ui/dropdown-menu.tsx	Completed the export block to fix TS build errors.
+app/api/dso/invoices/route.ts (example)	Updated POST handler to call finance_create_invoice_with_payment instead of separate inserts; set invoice status accordingly.
+app/api/dso/payments/route.ts	Adjusted to update invoice status to PAID when outstanding balance reaches zero.
+components/dso/InvoiceList.tsx	Modified to read from v_invoice_aging and display status, outstanding and ageing bucket columns.
+
+Refer to the diff file for full context.
+
+Seed Data Dummy
+
+To test the complete flow end‑to‑end, a seed script (seed_dummy_data.sql) is provided. It inserts minimal but representative data for all modules. Highlights:
+
+Roles & departments: inserts the 15 roles and 8 departments if they don’t already exist.
+
+Profiles: creates one test user per role with randomly generated UUIDs and assigns them to the appropriate department. Managers are linked via manager_user_id to enable team scoping.
+
+Service catalog: inserts several services (TRUK, SEA, AIR) owned by different departments.
+
+CRM: inserts customers, leads (via crm_create_lead_bundle RPC), prospects and sales activities. At least one lead uses the RFQ option to generate a masked ticket automatically.
+
+Ticketing: creates general tickets and inquiry tickets. Inserts ticket messages to trigger first‑response events.
+
+DSO: creates invoices and payments via the new RPC. Some invoices are fully paid, some partially paid and some overdue to exercise the ageing view.
+
+KPI: defines sample metrics (e.g. total_revenue, first_response_time) and targets for a sales manager and marketing manager.
+
+Marketing spend: inserts a few manual marketing events for completeness.
+
+After loading the seed data you can log in as any role and navigate through Dashboard, KPI, CRM, Ticketing and DSO modules to verify UI and RLS behaviour.
+
+Smoke Test Matrix (15 roles × 5 menus)
+
+The table below enumerates the expected access level per role and top‑level menu, based on the RBAC matrix defined in permissions.ts. Values: NA – menu hidden; R – read‑only; R_ALL – director read all; R_OWN – read only own items; R_TEAM – read only team; R_SLA – read SLA metrics; R_AR_DSO – read AR/DSO summary; R_SCOPED – read scoped by customer ownership; RW – full read/write; RW_OWN – read/write own; RW_ASSIST – sales support; RW_DEPT_MASKED – ops can read/write but see masked PII; A – admin.
+
+Role	Dashboard	KPI	CRM	Ticketing	DSO
+Director	R_ALL	R	R	R	R
+super admin	R	A	A	A	A
+Marketing Manager	R	RW	RW	RW	NA
+Marcomm (marketing staff)	R_OWN	RW_OWN	RW_OWN	RW	NA
+DGO (Marketing staff)	R_OWN	RW_OWN	RW_OWN	RW	NA
+MACX (marketing staff)	R_OWN	RW_OWN	RW_OWN	RW	NA
+VSDO (marketing staff)	R_OWN	RW_OWN	RW_OWN	RW	NA
+sales manager	R_TEAM	RW	RW	RW	R_SCOPED
+salesperson	R_OWN	RW_OWN	RW_OWN	RW	R_SCOPED
+sales support	NA	NA	RW_ASSIST	RW	NA
+EXIM Ops (operation)	R_SLA	NA	NA	RW_DEPT_MASKED	NA
+domestics Ops (operation)	R_SLA	NA	NA	RW_DEPT_MASKED	NA
+Import DTD Ops (operation)	R_SLA	NA	NA	RW_DEPT_MASKED	NA
+traffic & warehous (operation)	R_SLA	NA	NA	RW_DEPT_MASKED	NA
+finance	R_AR_DSO	R	R	NA	RW
+
+During smoke testing, verify that each role sees only the menus allowed above and that actions (list, create, update, delete) behave according to the access level. No disabled menu items should appear – inaccessible menus must be entirely hidden.
+
+Verification Checklist
+
+The following steps should be executed after applying the patches and seeding the test data. A PASS indicates the issue is resolved and the application behaves as specified.
+
+Apply migrations in order: run 00_schema.sql, 01_seed.sql, 02_rls.sql, 03_views.sql, 04_tests.sql then PATCHES.sql to apply fixes. Ensure no migration errors occur.
+
+Roles & menus: sign in as each role. Verify that the sidebar shows only allowed menus (no disabled items). Directors should see all menus but without write actions. Ops roles should see the Ticketing menu only.
+
+Invoice status & ageing: create several invoices with different dates and amounts via the new RPC. Make some payments. Query v_invoice_aging and verify the status, outstanding, days_overdue and aging_bucket columns reflect reality. Invoices with zero outstanding should have status PAID. The DSO UI should display the same information.
+
+SLA triggers: create a ticket and send a message as another user. Check sla_events for one OPENED and one FIRST_RESPONSE record. Update the ticket status to IN PROGRESS and then CLOSED; verify that STATUS_CHANGE and RESOLVED events are recorded with correct metadata.
+
+Invoice creation atomicity: use the finance_create_invoice_with_payment RPC to create an invoice with an initial payment. Simulate a partial failure by retrying the request; confirm that duplicate invoices/payments are not created. The invoice status should be WAITING_PAYMENT (or PAID if payment covers full amount).
+
+RLS smoke test: execute RLS_SMOKE_TEST.sql. For each role, attempt to select from audit_logs, imports, marketing_spend, leads, tickets, invoices and payments. Confirm that queries return rows only when permitted by the policies. Attempts by unauthorised roles should yield empty sets or access denied errors.
+
+UI build: run npm install and npm run build. Verify that the build succeeds (no TS errors) and that dropdown menus render correctly in the browser.
+
+Close‑reason enforcement: attempt to update an inquiry ticket to CLOSED LOST without supplying a close_reason. The API should return a 400 error. Provide a close_reason and verify that the update succeeds.
+
+Completion of this checklist demonstrates that the QA remediation has addressed the critical defects and that the system operates smoothly, securely and in alignment with the blueprint.
+
+Patch SQL (PATCHES.sql): mencakup pembuatan enum invoice_status, penambahan kolom status pada tabel invoices, pembuatan view v_invoice_aging, fungsi trg_sla_first_response dan trg_sla_status_change untuk pencatatan SLA, serta RPC finance_create_invoice_with_payment. Patch ini juga memperbaiki beberapa RLS dan check constraint. File lengkapnya: PATCHES.sql
+
+Patch Kode Next.js (PATCHES_code.diff): berisi diff untuk memperbarui route API agar menggunakan view baru (v_invoice_aging), memanggil RPC saat membuat invoice, memperbarui logika status dan notifikasi, serta memodifikasi route pembayaran agar atomik. File lengkapnya: PATCHES_code.diff
+
+Seed Data Dummy (seed_dummy_data.sql): menyediakan data contoh untuk 15 role, beberapa customer/lead, ticket dengan SLA yang terlanggar, invoice dengan berbagai status, KPI auto/manual, dan marketing spend. Digunakan untuk smoke test semua alur. File: seed_dummy_data.sql
+
+RLS Smoke Test (RLS_SMOKE_TEST.sql): skrip untuk mengeset klaim JWT per user dan mengeksekusi query ke tabel penting guna memastikan semua kebijakan RLS berjalan sesuai harapan. File: RLS_SMOKE_TEST.sql
+
+Silakan terapkan patch SQL terlebih dahulu, kemudian patch kode, dan jalankan seed serta skrip smoke test untuk memverifikasi. Jika ada pertanyaan lebih lanjut atau butuh penyesuaian, beritahu saya.
