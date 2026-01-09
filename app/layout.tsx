@@ -1,13 +1,9 @@
 import type { Metadata } from "next";
-import { Inter } from "next/font/google";
 import { ThemeProvider } from "@/components/theme-provider";
 import "./globals.css";
 
-const inter = Inter({
-  subsets: ["latin"],
-  display: "swap",
-  variable: "--font-inter",
-});
+// System font stack - avoids Google Fonts network dependency during build
+// while maintaining consistent cross-platform typography.
 
 export const metadata: Metadata = {
   title: "UGC Logistics Dashboard",
@@ -21,7 +17,7 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en" suppressHydrationWarning>
-      <body className={`${inter.variable} font-sans min-h-screen antialiased`}>
+      <body className="font-sans min-h-screen antialiased">
         <ThemeProvider>{children}</ThemeProvider>
       </body>
     </html>
