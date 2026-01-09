@@ -1,8 +1,0 @@
-components/ui/dropdown-menu.tsx(18,20): error TS1005: ',' expected.
-components/ui/dropdown-menu.tsx(39,1): error TS1109: Expression expected.
-components/ui/dropdown-menu.tsx(54,1): error TS1109: Expression expected.
-components/ui/dropdown-menu.tsx(73,20): error TS1005: ',' expected.
-components/ui/dropdown-menu.tsx(91,1): error TS1109: Expression expected.
-components/ui/dropdown-menu.tsx(114,1): error TS1109: Expression expected.
-components/ui/dropdown-menu.tsx(136,20): error TS1005: ',' expected.
-components/ui/dropdown-menu.tsx(154,1): error TS1109: Expression expected.
