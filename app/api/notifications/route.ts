@@ -85,11 +85,11 @@ export async function GET(request: NextRequest) {
     // Get overdue invoices for finance role
     if (["finance", "super admin", "Director"].includes(profile.role_name)) {
       const { data: overdueInvoices } = await supabase
-        .from("v_invoice_outstanding")
-        .select("invoice_id, customer_id, outstanding_amount, days_past_due")
-        .eq("is_overdue", true)
-        .gt("outstanding_amount", 0)
-        .order("days_past_due", { ascending: false })
+        .from("v_invoice_aging")
+        .select("invoice_id, customer_id, outstanding, days_overdue")
+        .gt("outstanding", 0)
+        .gt("days_overdue", 0)
+        .order("days_overdue", { ascending: false })
         .limit(3);
 
       if (overdueInvoices) {
@@ -98,7 +98,7 @@ export async function GET(request: NextRequest) {
             id: `invoice-${inv.invoice_id}`,
             type: "invoice",
             title: "Overdue Invoice",
-            message: `${inv.invoice_id} - ${inv.days_past_due} days overdue (Rp ${Number(inv.outstanding_amount).toLocaleString("id-ID")})`,
+            message: `${inv.invoice_id} - ${inv.days_overdue} days overdue (Rp ${Number(inv.outstanding).toLocaleString("id-ID")})`,
             href: `/dso/invoices/${inv.invoice_id}`,
             read: false,
             created_at: now.toISOString(),

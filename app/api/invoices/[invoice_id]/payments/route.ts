@@ -68,10 +68,13 @@ export async function POST(
       return NextResponse.json({ error: "Missing required fields: payment_date, amount" }, { status: 400 });
     }
 
-    // Verify invoice exists and get outstanding amount
+    // Verify invoice exists and get outstanding amount.  Use the v_invoice_aging view
+    // instead of v_invoice_outstanding.  The view returns an `outstanding` field
+    // representing the remaining balance on the invoice.  This allows us to also
+    // retrieve other metadata (like days_overdue) if needed.
     const { data: invoiceData, error: invoiceError } = await supabase
-      .from("v_invoice_outstanding")
-      .select("invoice_id, invoice_amount, outstanding_amount")
+      .from("v_invoice_aging")
+      .select("invoice_id, outstanding")
       .eq("invoice_id", invoice_id)
       .single();
 
@@ -79,10 +82,14 @@ export async function POST(
       return NextResponse.json({ error: "Invoice not found" }, { status: 404 });
     }
 
-    // Warn if payment exceeds outstanding (but allow it)
+    // Warn if payment exceeds outstanding (but allow it).  Use the `outstanding`
+    // field from v_invoice_aging.  If `outstanding` is null treat as zero.
     const paymentAmount = parseFloat(amount);
-    if (paymentAmount > invoiceData.outstanding_amount) {
-      console.warn(`Payment amount ${paymentAmount} exceeds outstanding ${invoiceData.outstanding_amount} for invoice ${invoice_id}`);
+    const currentOutstanding = parseFloat(invoiceData.outstanding || "0");
+    if (paymentAmount > currentOutstanding) {
+      console.warn(
+        `Payment amount ${paymentAmount} exceeds outstanding ${currentOutstanding} for invoice ${invoice_id}`
+      );
     }
 
     // Create payment
@@ -114,17 +121,38 @@ export async function POST(
       after_data: payment,
     });
 
-    // Get updated outstanding
-    const { data: updatedInvoice } = await supabase
-      .from("v_invoice_outstanding")
-      .select("outstanding_amount")
+    // After inserting a payment, update the invoice status based on remaining
+    // outstanding.  Use the v_invoice_aging view to obtain the latest
+    // outstanding balance.  If outstanding > 0 then status becomes
+    // WAITING_PAYMENT, otherwise it becomes PAID.
+    const { data: invoiceSummary, error: summaryError } = await supabase
+      .from("v_invoice_aging")
+      .select("outstanding")
+      .eq("invoice_id", invoice_id)
+      .single();
+    if (!summaryError && invoiceSummary) {
+      const outstanding = parseFloat(invoiceSummary.outstanding || "0");
+      const newStatus = outstanding > 0 ? "WAITING_PAYMENT" : "PAID";
+      await supabase
+        .from("invoices")
+        .update({ status: newStatus })
+        .eq("invoice_id", invoice_id);
+    }
+
+    // Get updated outstanding amount for the response
+    const { data: updated } = await supabase
+      .from("v_invoice_aging")
+      .select("outstanding")
       .eq("invoice_id", invoice_id)
       .single();
 
-    return NextResponse.json({ 
-      payment,
-      remaining_outstanding: updatedInvoice?.outstanding_amount || 0,
-    }, { status: 201 });
+    return NextResponse.json(
+      {
+        payment,
+        remaining_outstanding: updated?.outstanding || 0,
+      },
+      { status: 201 }
+    );
   } catch (err) {
     console.error("Payments API error:", err);
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });

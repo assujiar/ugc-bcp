@@ -16,20 +16,24 @@ export async function GET(request: NextRequest) {
     const type = searchParams.get("type") || "summary"; // summary, aging, rolling, my-customers
 
     if (type === "summary") {
-      // Get overall AR summary
-      const { data: outstanding, error: outstandingError } = await supabase
-        .from("v_invoice_outstanding")
+      // Get overall AR summary using v_invoice_aging.  This view provides
+      // outstanding (remaining balance) and days_overdue for each invoice.
+      const { data: aging, error: agingError } = await supabase
+        .from("v_invoice_aging")
         .select("*");
 
-      if (outstandingError) {
-        return NextResponse.json({ error: outstandingError.message }, { status: 500 });
+      if (agingError) {
+        return NextResponse.json({ error: agingError.message }, { status: 500 });
       }
 
-      // Calculate summary metrics
-      const totalAR = outstanding?.reduce((sum, inv) => sum + parseFloat(inv.outstanding_amount || "0"), 0) || 0;
-      const totalOverdue = outstanding?.filter((inv) => inv.is_overdue).reduce((sum, inv) => sum + parseFloat(inv.outstanding_amount || "0"), 0) || 0;
-      const overdueCount = outstanding?.filter((inv) => inv.is_overdue).length || 0;
-      const totalInvoices = outstanding?.length || 0;
+      // Calculate summary metrics.  Only consider invoices with positive
+      // outstanding for AR totals.  Overdue invoices are those with
+      // outstanding > 0 and days_overdue > 0.
+      const totalAR = aging?.reduce((sum, inv) => sum + parseFloat(inv.outstanding || "0"), 0) || 0;
+      const totalOverdue = aging?.filter((inv) => parseFloat(inv.outstanding || "0") > 0 && inv.days_overdue > 0)
+        .reduce((sum, inv) => sum + parseFloat(inv.outstanding || "0"), 0) || 0;
+      const overdueCount = aging?.filter((inv) => parseFloat(inv.outstanding || "0") > 0 && inv.days_overdue > 0).length || 0;
+      const totalInvoices = aging?.length || 0;
 
       return NextResponse.json({
         total_ar: totalAR,
