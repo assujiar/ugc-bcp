@@ -46,7 +46,7 @@ export async function GET(request: NextRequest) {
       );
 
       if (!rpcError && rpcResult) {
-        return NextResponse.json(rpcResult);
+        return NextResponse.json({ ...rpcResult, fallback_used: false });
       }
     } catch {
       // RPC might not exist yet, fall back to direct query
@@ -157,6 +157,8 @@ export async function GET(request: NextRequest) {
       exists: matches.length > 0,
       count: matches.length,
       matches,
+      fallback_used: true,
+      fallback_reason: "crm_check_duplicate RPC is not available, using direct query",
     });
   } catch (error) {
     console.error("Error in GET /api/leads/dedup:", error);

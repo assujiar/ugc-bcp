@@ -1,16 +1,31 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { useSearchParams } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Eye, EyeOff, Mail, Lock, ArrowRight, Shield, Database, Users } from "lucide-react";
 
+const ERROR_MESSAGES: Record<string, string> = {
+  profile_not_found: "Your account exists but no profile was found. Please contact an administrator to create your profile.",
+  auth_callback_error: "Authentication failed. Please try again.",
+};
+
 export default function LoginPage() {
+  const searchParams = useSearchParams();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Check for error in URL query params
+  useEffect(() => {
+    const errorCode = searchParams.get("error");
+    if (errorCode && ERROR_MESSAGES[errorCode]) {
+      setError(ERROR_MESSAGES[errorCode]);
+    }
+  }, [searchParams]);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -19,7 +34,7 @@ export default function LoginPage() {
 
     try {
       const supabase = createClient();
-      const { error: authError } = await supabase.auth.signInWithPassword({
+      const { data, error: authError } = await supabase.auth.signInWithPassword({
         email,
         password,
       });
@@ -30,8 +45,20 @@ export default function LoginPage() {
         return;
       }
 
-      window.location.href = "/dashboard";
-    } catch {
+      if (!data.session) {
+        setError("Login succeeded but no session was created. Please try again.");
+        setLoading(false);
+        return;
+      }
+
+      // Wait a moment for cookies to be set properly
+      // Then use router.refresh() pattern for Next.js
+      await new Promise(resolve => setTimeout(resolve, 100));
+
+      // Force a hard navigation to ensure session is loaded on server
+      window.location.replace("/dashboard");
+    } catch (err) {
+      console.error("Login error:", err);
       setError("An error occurred. Please try again.");
       setLoading(false);
     }

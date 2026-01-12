@@ -65,6 +65,72 @@ npm run dev
 
 Open [http://localhost:3000](http://localhost:3000) with your browser.
 
+## Database Setup
+
+### Applying Migrations
+
+Run all migrations in order against your Supabase instance:
+
+```bash
+# Via Supabase CLI
+supabase db push
+
+# Or manually via SQL Editor in Supabase Dashboard:
+# Execute files in supabase/migrations/ in order:
+# 00_schema.sql -> 01_seed.sql -> 02_rls.sql -> ... -> 08_seed_qa.sql
+```
+
+### QA Testing Data
+
+For QA and development testing, apply the seed data migration:
+
+```sql
+-- Run in Supabase SQL Editor
+-- File: supabase/migrations/08_seed_qa.sql
+```
+
+This creates:
+- 12 test user profiles (across all roles)
+- 5 sample customers
+- 9 sample leads (various statuses)
+- 5 sample prospects
+- 7 sample invoices (various aging buckets)
+- Sample payments, tickets, sales activities
+- Sample KPI targets and actuals
+
+**Note:** Test users have deterministic UUIDs starting with `00000000-...`. In production, users are created via Supabase Auth.
+
+### Offline Installation
+
+For environments without network access:
+
+1. Build a `node_modules` cache on a network-connected machine:
+   ```bash
+   npm ci
+   tar -czf node_modules.tar.gz node_modules
+   ```
+
+2. Transfer `node_modules.tar.gz` to the offline environment
+
+3. Extract and use:
+   ```bash
+   tar -xzf node_modules.tar.gz
+   npm run build
+   ```
+
+## Build Verification
+
+```bash
+# Type check
+npx tsc --noEmit
+
+# Lint
+npm run lint
+
+# Build
+npm run build
+```
+
 ## Project Structure
 
 ```
