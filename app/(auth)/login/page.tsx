@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { ThemeToggle } from "@/components/theme-toggle";
@@ -11,21 +11,26 @@ const ERROR_MESSAGES: Record<string, string> = {
   auth_callback_error: "Authentication failed. Please try again.",
 };
 
-export default function LoginPage() {
+// Separate component to handle URL error params (requires Suspense boundary)
+function ErrorFromUrl({ onError }: { onError: (msg: string) => void }) {
   const searchParams = useSearchParams();
+
+  useEffect(() => {
+    const errorCode = searchParams.get("error");
+    if (errorCode && ERROR_MESSAGES[errorCode]) {
+      onError(ERROR_MESSAGES[errorCode]);
+    }
+  }, [searchParams, onError]);
+
+  return null;
+}
+
+export default function LoginPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  // Check for error in URL query params
-  useEffect(() => {
-    const errorCode = searchParams.get("error");
-    if (errorCode && ERROR_MESSAGES[errorCode]) {
-      setError(ERROR_MESSAGES[errorCode]);
-    }
-  }, [searchParams]);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -72,6 +77,9 @@ export default function LoginPage() {
 
   return (
     <div className="min-h-screen flex">
+      <Suspense fallback={null}>
+        <ErrorFromUrl onError={setError} />
+      </Suspense>
       <div className="hidden lg:flex lg:w-1/2 relative overflow-hidden">
         <div className="absolute inset-0 bg-gradient-to-br from-secondary via-secondary to-primary" />
         <div className="absolute inset-0 opacity-10" style={{ backgroundImage: `radial-gradient(circle at 25% 25%, white 1px, transparent 1px)`, backgroundSize: '32px 32px' }} />
