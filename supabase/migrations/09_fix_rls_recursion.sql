@@ -7,23 +7,13 @@
 --
 -- Solution: Make the helper functions use SECURITY DEFINER so they bypass
 -- RLS when querying the profiles table internally.
+--
+-- Note: Using CREATE OR REPLACE instead of DROP to preserve dependent policies.
 
 -- =========================================================
 -- Recreate helper functions with SECURITY DEFINER
+-- Using CREATE OR REPLACE to preserve dependent RLS policies
 -- =========================================================
-
--- Drop existing functions first (they'll be recreated with same signature)
-drop function if exists app_current_role();
-drop function if exists app_current_dept();
-drop function if exists app_is_role(text);
-drop function if exists app_is_any_role(text[]);
-drop function if exists app_is_authenticated();
-drop function if exists app_is_marketing();
-drop function if exists app_is_sales();
-drop function if exists app_is_ops();
-drop function if exists app_is_super_admin();
-drop function if exists app_is_director();
-drop function if exists app_is_my_team_member(uuid);
 
 -- app_current_role: Get the current user's role from profiles
 -- SECURITY DEFINER allows this to bypass RLS
