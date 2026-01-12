@@ -7,7 +7,7 @@ import { ThemeToggle } from "@/components/theme-toggle";
 import { Eye, EyeOff, Mail, Lock, ArrowRight, Shield, Database, Users } from "lucide-react";
 
 const ERROR_MESSAGES: Record<string, string> = {
-  profile_not_found: "Your account exists but no profile was found. Please contact an administrator to create your profile.",
+  profile_not_found: "Your account exists but no profile was found. Please contact an administrator to create your profile with your User ID (shown below).",
   auth_callback_error: "Authentication failed. Please try again.",
 };
 
@@ -18,12 +18,25 @@ function LoginContent() {
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [userId, setUserId] = useState<string | null>(null);
 
-  // Check for error in URL query params
+  // Check for error in URL query params and fetch user ID if profile_not_found
   useEffect(() => {
     const errorCode = searchParams.get("error");
     if (errorCode && ERROR_MESSAGES[errorCode]) {
       setError(ERROR_MESSAGES[errorCode]);
+
+      // If profile not found, try to get the current user's ID to show them
+      if (errorCode === "profile_not_found") {
+        const fetchUserId = async () => {
+          const supabase = createClient();
+          const { data: { user } } = await supabase.auth.getUser();
+          if (user) {
+            setUserId(user.id);
+          }
+        };
+        fetchUserId();
+      }
     }
   }, [searchParams]);
 
@@ -31,6 +44,7 @@ function LoginContent() {
     e.preventDefault();
     setLoading(true);
     setError(null);
+    setUserId(null);
 
     try {
       const supabase = createClient();
@@ -45,14 +59,35 @@ function LoginContent() {
         return;
       }
 
-      if (!data.session) {
+      if (!data.session || !data.user) {
         setError("Login succeeded but no session was created. Please try again.");
         setLoading(false);
         return;
       }
 
+      // Check if profile exists for this user
+      const { data: profile, error: profileError } = await supabase
+        .from("profiles")
+        .select("user_id")
+        .eq("user_id", data.user.id)
+        .maybeSingle();
+
+      if (profileError) {
+        console.error("Error checking profile:", profileError);
+        setError("Error checking your profile. Please try again.");
+        setLoading(false);
+        return;
+      }
+
+      if (!profile) {
+        // No profile found - show helpful message with user ID
+        setUserId(data.user.id);
+        setError(ERROR_MESSAGES.profile_not_found);
+        setLoading(false);
+        return;
+      }
+
       // Wait a moment for cookies to be set properly
-      // Then use router.refresh() pattern for Next.js
       await new Promise(resolve => setTimeout(resolve, 100));
 
       // Force a hard navigation to ensure session is loaded on server
@@ -152,7 +187,17 @@ function LoginContent() {
                   </button>
                 </div>
               </div>
-              {error && (<div className="p-3 rounded-lg bg-destructive/10 border border-destructive/20"><p className="text-sm text-destructive">{error}</p></div>)}
+              {error && (
+                <div className="p-3 rounded-lg bg-destructive/10 border border-destructive/20">
+                  <p className="text-sm text-destructive">{error}</p>
+                  {userId && (
+                    <div className="mt-2 p-2 bg-background rounded border border-border">
+                      <p className="text-xs text-muted-foreground mb-1">Your User ID:</p>
+                      <code className="text-xs font-mono text-foreground break-all select-all">{userId}</code>
+                    </div>
+                  )}
+                </div>
+              )}
               <button type="submit" disabled={loading} className="btn-primary w-full group">
                 {loading ? (<><svg className="animate-spin h-5 w-5" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" /></svg><span>Signing in...</span></>) : (<><span>Sign in</span><ArrowRight className="h-5 w-5 group-hover:translate-x-1 transition-transform" /></>)}
               </button>

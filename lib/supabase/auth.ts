@@ -23,18 +23,24 @@ export async function getUser() {
 export async function getProfile() {
   const supabase = await createServerClient();
   const { data: { user } } = await supabase.auth.getUser();
-  
+
   if (!user) return null;
 
+  // Use maybeSingle() to handle 0 rows gracefully (returns null, not error)
+  // This helps distinguish between "no profile found" vs actual errors
   const { data: profile, error } = await supabase
     .from("profiles")
     .select("*")
     .eq("user_id", user.id)
-    .single();
+    .maybeSingle();
 
   if (error) {
-    console.error("Error getting profile:", error);
+    console.error("Error getting profile for user:", user.id, "Error:", error.message, error.code);
     return null;
+  }
+
+  if (!profile) {
+    console.warn("No profile found for authenticated user:", user.id, "email:", user.email);
   }
 
   return profile;
