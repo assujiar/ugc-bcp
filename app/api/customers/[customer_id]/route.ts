@@ -65,9 +65,19 @@ export async function PATCH(
       return NextResponse.json({ error: "Profile not found" }, { status: 403 });
     }
 
-    // Director cannot edit
-    if (profile.role_name === "Director") {
-      return NextResponse.json({ error: "Directors cannot edit customer data" }, { status: 403 });
+    // Only specific roles can update customers (not Director, marketing, ops, or finance)
+    const allowedRoles = [
+      "super admin",
+      "sales manager",
+      "salesperson",
+      "sales support",
+    ];
+
+    if (!allowedRoles.includes(profile.role_name)) {
+      return NextResponse.json(
+        { error: "Only sales roles and admin can edit customer data" },
+        { status: 403 }
+      );
     }
 
     const body = await request.json();

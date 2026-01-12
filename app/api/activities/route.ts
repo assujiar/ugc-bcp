@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
 import { getProfile } from "@/lib/supabase/auth";
+import { validateSort, validatePagination, errorResponse } from "@/lib/api/validation";
 
 // GET /api/activities - List sales activities
 export async function GET(request: NextRequest) {
@@ -9,16 +10,30 @@ export async function GET(request: NextRequest) {
     const profile = await getProfile();
 
     if (!profile) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      return errorResponse("Unauthorized", 401);
     }
 
     const { searchParams } = new URL(request.url);
-    const page = parseInt(searchParams.get("page") || "1", 10);
-    const pageSize = parseInt(searchParams.get("pageSize") || "20", 10);
+    const { page, pageSize } = validatePagination(
+      searchParams.get("page"),
+      searchParams.get("pageSize")
+    );
     const prospectId = searchParams.get("prospect_id") || "";
     const activityType = searchParams.get("activity_type") || "";
-    const sortBy = searchParams.get("sortBy") || "created_at";
-    const sortOrder = searchParams.get("sortOrder") || "desc";
+
+    // Validate sort parameters against allowed columns
+    const sortValidation = validateSort(
+      "activities",
+      searchParams.get("sortBy"),
+      searchParams.get("sortOrder"),
+      "created_at"
+    );
+
+    if (!sortValidation.valid) {
+      return sortValidation.error;
+    }
+
+    const { sortBy, sortOrder } = sortValidation.result;
 
     let query = supabase
       .from("sales_activities")
@@ -40,7 +55,7 @@ export async function GET(request: NextRequest) {
       query = query.eq("activity_type", activityType);
     }
 
-    // Apply sorting
+    // Apply sorting (validated against allowed columns)
     query = query.order(sortBy, { ascending: sortOrder === "asc" });
 
     // Apply pagination
@@ -52,7 +67,7 @@ export async function GET(request: NextRequest) {
 
     if (error) {
       console.error("Error fetching activities:", error);
-      return NextResponse.json({ error: error.message }, { status: 500 });
+      return errorResponse(error.message, 500);
     }
 
     return NextResponse.json({
@@ -66,7 +81,7 @@ export async function GET(request: NextRequest) {
     });
   } catch (error) {
     console.error("Error in GET /api/activities:", error);
-    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+    return errorResponse("Internal server error", 500);
   }
 }
 

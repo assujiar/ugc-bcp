@@ -159,6 +159,43 @@ Supabase Postgres (RLS enforced)
 
 ---
 
+## 3.3 Dynamic Route Parameter Naming Convention
+
+**IMPORTANT:** All dynamic route segments must follow this naming convention to avoid collisions and maintain consistency:
+
+### Naming Rules
+- Use `<table_name>_id` format for all entity identifiers
+- Examples: `[invoice_id]`, `[customer_id]`, `[lead_id]`, `[ticket_id]`, `[user_id]`, `[view_id]`
+- Never use generic `[id]` segments
+- Parameter names should match the primary key column name in the database
+
+### Current Dynamic Routes
+| Route | Parameter | Entity |
+|-------|-----------|--------|
+| `/api/invoices/[invoice_id]` | `invoice_id` | Invoice |
+| `/api/invoices/[invoice_id]/payments` | `invoice_id` | Invoice payments |
+| `/api/customers/[customer_id]` | `customer_id` | Customer |
+| `/api/leads/[lead_id]` | `lead_id` | Lead |
+| `/api/leads/[lead_id]/assign` | `lead_id` | Lead assignment |
+| `/api/tickets/[ticket_id]` | `ticket_id` | Ticket |
+| `/api/saved-views/[view_id]` | `view_id` | Saved view |
+| `/api/users/manage/[user_id]` | `user_id` | User management |
+
+### Next.js 15+ Params Handling
+In Next.js 15+, route handler params are passed as a Promise and must be awaited:
+
+```typescript
+export async function GET(
+  request: NextRequest,
+  { params }: { params: Promise<{ invoice_id: string }> }
+) {
+  const { invoice_id } = await params;
+  // ... handler logic
+}
+```
+
+---
+
 ## 4. Repository Structure (Final)
 
 ```

@@ -53,6 +53,7 @@ export async function GET(request: NextRequest) {
           total,
           total_assigned: totalAssigned,
           total_unassigned: totalUnassigned,
+          fallback_used: false,
         });
       }
     } catch {
@@ -103,6 +104,8 @@ export async function GET(request: NextRequest) {
       total,
       total_assigned: totalAssigned,
       total_unassigned: totalUnassigned,
+      fallback_used: true,
+      fallback_reason: "crm_get_pipeline_stats RPC is not available, using direct query",
     });
   } catch (error) {
     console.error("Error in GET /api/leads/stats:", error);

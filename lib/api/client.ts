@@ -351,13 +351,19 @@ export interface KpiProgress {
   actual_updated_at?: string;
 }
 
+export interface KpiProgressResponse {
+  data: KpiProgress[];
+  fallback_used: boolean;
+  fallback_reason?: string;
+}
+
 export async function fetchKpiProgress(params?: {
   period_start?: string;
   period_end?: string;
   metric_key?: string;
   user_id?: string;
 }) {
-  return apiClient<{ data: KpiProgress[] }>("/api/kpi/progress", { params });
+  return apiClient<KpiProgressResponse>("/api/kpi/progress", { params });
 }
 
 export async function updateKpiProgress(data: {
@@ -379,6 +385,8 @@ export interface LeadsStats {
   total: number;
   total_assigned: number;
   total_unassigned: number;
+  fallback_used?: boolean;
+  fallback_reason?: string;
 }
 
 export async function fetchLeadsStats(assigneeId?: string) {
@@ -403,6 +411,8 @@ export interface DedupResult {
   exists: boolean;
   count: number;
   matches: DedupMatch[];
+  fallback_used?: boolean;
+  fallback_reason?: string;
 }
 
 export async function checkLeadDuplicate(email?: string, phone?: string) {

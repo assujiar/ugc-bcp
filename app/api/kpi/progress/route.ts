@@ -67,14 +67,19 @@ export async function GET(request: NextRequest) {
           return NextResponse.json({ error: actualsError.message }, { status: 500 });
         }
 
-        return NextResponse.json({ data: actualsData || [] });
+        // Include fallback_used flag to indicate the view is unavailable
+        return NextResponse.json({
+          data: actualsData || [],
+          fallback_used: true,
+          fallback_reason: "v_kpi_progress view is not available, using kpi_actuals table directly",
+        });
       }
 
       console.error("Error fetching kpi_progress:", error);
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
 
-    return NextResponse.json({ data: data || [] });
+    return NextResponse.json({ data: data || [], fallback_used: false });
   } catch (error) {
     console.error("Error in GET /api/kpi/progress:", error);
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });
